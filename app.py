@@ -59,10 +59,46 @@ def get_ical_events(url, exclude_keywords):
         st.error(f"Fehler beim Laden von {user}: {e}")
         return []
 
+st.set_page_config(page_title="DHBW Termin-Finder", page_icon="📅")
 st.title("DHBW Termin-Finder 📅")
-st.write("Die Kalender werden über den offiziellen iCal-Export synchronisiert. Bestimmte Vorlesungen werden ignoriert.")
+st.write("Wähle aus, wessen Kalender abgeglichen werden sollen.")
 
-# --- NEU: Wochen-Auswahl ---
+# Hardcoded Kalender mit den Vorgaben und Namen
+all_calendars = {
+    "Jannis": {
+        "url": "https://rapla.dhbw.de/rapla/internal_calendar?user=muenzer@vw.ba.ba-ravensburg.de&file=TFE24-2",
+        "exclude": ["künstliche Intelligenz", "STA Mercedes", "Quantentechnologie"]
+    },
+    "André": {
+        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24",
+        "exclude": ["Kraftfahrzeuge", "Qualitätsmanagement", "Studienarbeit"]
+    },
+    "Ruben": {
+        "url": "https://rapla.dhbw.de/rapla/calendar?user=brath%40vw.ba.ba-ravensburg.de&file=Stundenplan+TWI25-2",
+        "exclude": []
+    }
+}
+
+# --- UI: Auswahl der Personen ---
+st.subheader("Wer soll Zeit haben?")
+col1, col2, col3 = st.columns(3)
+with col1:
+    check_jannis = st.checkbox("Jannis", value=True)
+with col2:
+    check_andre = st.checkbox("André", value=True)
+with col3:
+    check_ruben = st.checkbox("Ruben", value=True)
+
+# Sammle die ausgewählten Kalender
+selected_calendars = []
+if check_jannis: selected_calendars.append(all_calendars["Jannis"])
+if check_andre: selected_calendars.append(all_calendars["André"])
+if check_ruben: selected_calendars.append(all_calendars["Ruben"])
+
+# --- UI: Optionen ---
+show_individual_plans = st.checkbox("Zeige zusätzlich die Stundenpläne der ausgewählten Personen an")
+
+# --- UI: Wochen-Auswahl ---
 week_offset = st.slider(
     "Welche Woche möchtest du checken?", 
     min_value=0, 
@@ -70,91 +106,119 @@ week_offset = st.slider(
     value=0, 
     format="In %d Woche(n)"
 )
+
 if week_offset == 0:
     st.info("Gewählt: **Diese Woche**")
 elif week_offset == 1:
     st.info("Gewählt: **Nächste Woche**")
 else:
     st.info(f"Gewählt: **In {week_offset} Wochen**")
-# ---------------------------
 
-# Hardcoded Kalender mit den Vorgaben
-calendars = [
-    {
-        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24",
-        "exclude": ["Kraftfahrzeuge", "Qualitätsmanagement", "Studienarbeit"]
-    },
-    {
-        "url": "https://rapla.dhbw.de/rapla/calendar?user=brath%40vw.ba.ba-ravensburg.de&file=Stundenplan+TWI25-2",
-        "exclude": []
-    },
-    {
-        "url": "https://rapla.dhbw.de/rapla/internal_calendar?user=muenzer@vw.ba.ba-ravensburg.de&file=TFE24-2",
-        "exclude": ["künstliche Intelligenz", "STA Mercedes"]
-    }
-]
+if st.button("Zeiten berechnen", type="primary"):
+    if not selected_calendars:
+        st.warning("Bitte wähle mindestens eine Person aus!")
+    else:
+        with st.spinner('Kalender werden abgeglichen...'):
+            # Start der ausgewählten Woche berechnen (Montag)
+            today = datetime.today()
+            start_of_current_week = today - timedelta(days=today.weekday()) 
+            start_of_current_week = start_of_current_week.replace(hour=8, minute=0, second=0, microsecond=0)
+            start_of_target_week = start_of_current_week + timedelta(weeks=week_offset)
+            end_of_target_week = start_of_target_week + timedelta(days=5) # Freitag Nacht
 
-if st.button("Gemeinsame freie Zeit finden", type="primary"):
-    with st.spinner('Kalender werden abgeglichen...'):
-        all_events = []
-        for cal in calendars:
-            events = get_ical_events(cal["url"], cal["exclude"])
-            all_events.extend(events)
+            all_blocked_slots = set()
+            individual_events_text = { "Jannis": [], "André": [], "Ruben": [] }
             
-        # Blockierte 15-Minuten-Slots berechnen
-        blocked_slots = set()
-        for event in all_events:
-            start_dt = event['DTSTART']
-            end_dt = event['DTEND']
-            
-            curr = start_dt
-            while curr < end_dt:
-                blocked_slots.add(curr)
-                curr += timedelta(minutes=15)
+            # Events für die ausgewählten Personen abrufen
+            selected_names = []
+            if check_jannis: selected_names.append("Jannis")
+            if check_andre: selected_names.append("André")
+            if check_ruben: selected_names.append("Ruben")
 
-        # Start der ausgewählten Woche berechnen (Montag)
-        today = datetime.today()
-        # Montag dieser Woche:
-        start_of_current_week = today - timedelta(days=today.weekday()) 
-        start_of_current_week = start_of_current_week.replace(hour=8, minute=0, second=0, microsecond=0)
-        
-        # Auf die gewählte Woche verschieben (+ 7 Tage pro week_offset)
-        start_of_target_week = start_of_current_week + timedelta(weeks=week_offset)
-        
-        st.subheader("Eure Freistunden:")
-        
-        tage = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
-        found_any = False
-        
-        for day in range(5):
-            current_day = start_of_target_week + timedelta(days=day)
-            free_periods = []
-            current_free_start = None
-            
-            # Das Tagesraster abarbeiten (jetzt von 8 bis 23 Uhr)
-            for hour in range(8, 23):
-                for minute in (0, 15, 30, 45):
-                    slot = current_day.replace(hour=hour, minute=minute)
-                    if slot not in blocked_slots:
-                        if current_free_start is None:
-                            current_free_start = slot
-                    else:
-                        if current_free_start is not None:
-                            free_periods.append((current_free_start, slot))
-                            current_free_start = None
-                            
-            if current_free_start is not None:
-                end_of_day = current_day.replace(hour=23, minute=0)
-                free_periods.append((current_free_start, end_of_day))
+            for name in selected_names:
+                cal = all_calendars[name]
+                events = get_ical_events(cal["url"], cal["exclude"])
                 
-            # Nur Zeitfenster anzeigen, die mindestens 45 Minuten lang sind
-            valid_periods = [(s, e) for s, e in free_periods if (e - s).total_seconds() >= 2700]
-            
-            if valid_periods:
-                found_any = True
-                st.write(f"**{tage[day]}, {current_day.strftime('%d.%m.')}**")
-                for start, end in valid_periods:
-                    st.success(f"✅ {start.strftime('%H:%M')} bis {end.strftime('%H:%M')} Uhr")
+                for event in events:
+                    start_dt = event['DTSTART']
+                    end_dt = event['DTEND']
                     
-        if not found_any:
-            st.warning("In dieser Woche habt ihr leider keine gemeinsamen Freistunden (zwischen 8 und 23 Uhr).")
+                    # Nur Events berücksichtigen, die in der ausgewählten Woche liegen
+                    if start_of_target_week <= start_dt < end_of_target_week:
+                        # Für die Einzelanzeige speichern
+                        individual_events_text[name].append({
+                            "title": event.get("SUMMARY", "Termin"),
+                            "start": start_dt,
+                            "end": end_dt
+                        })
+                        
+                        # In 15-Minuten-Blöcke für die Freistunden-Berechnung zerlegen
+                        curr = start_dt
+                        while curr < end_dt:
+                            all_blocked_slots.add(curr)
+                            curr += timedelta(minutes=15)
+            
+            # --- TEIL 1: Einzelne Stundenpläne anzeigen (falls gewünscht) ---
+            if show_individual_plans:
+                st.subheader("Stundenpläne (Ausgewählte Woche):")
+                
+                # Wir machen Tabs für jede ausgewählte Person
+                tabs = st.tabs(selected_names)
+                
+                for i, name in enumerate(selected_names):
+                    with tabs[i]:
+                        person_events = individual_events_text[name]
+                        if not person_events:
+                            st.write("Keine Vorlesungen in dieser Woche!")
+                        else:
+                            # Nach Datum sortieren
+                            person_events.sort(key=lambda x: x["start"])
+                            
+                            current_print_day = None
+                            for ev in person_events:
+                                ev_day = ev["start"].date()
+                                if ev_day != current_print_day:
+                                    st.markdown(f"**{ev['start'].strftime('%A, %d.%m.')}**")
+                                    current_print_day = ev_day
+                                st.write(f"- {ev['start'].strftime('%H:%M')} bis {ev['end'].strftime('%H:%M')}: {ev['title']}")
+                
+                st.divider() # Trennlinie
+
+            # --- TEIL 2: Gemeinsame Freistunden berechnen ---
+            st.subheader(f"Eure gemeinsamen Freistunden ({', '.join(selected_names)}):")
+            
+            tage = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag"]
+            found_any = False
+            
+            for day in range(5):
+                current_day = start_of_target_week + timedelta(days=day)
+                free_periods = []
+                current_free_start = None
+                
+                # Das Tagesraster abarbeiten (8 bis 23 Uhr)
+                for hour in range(8, 23):
+                    for minute in (0, 15, 30, 45):
+                        slot = current_day.replace(hour=hour, minute=minute)
+                        if slot not in all_blocked_slots:
+                            if current_free_start is None:
+                                current_free_start = slot
+                        else:
+                            if current_free_start is not None:
+                                free_periods.append((current_free_start, slot))
+                                current_free_start = None
+                                
+                if current_free_start is not None:
+                    end_of_day = current_day.replace(hour=23, minute=0)
+                    free_periods.append((current_free_start, end_of_day))
+                    
+                # Nur Zeitfenster anzeigen, die mindestens 45 Minuten lang sind
+                valid_periods = [(s, e) for s, e in free_periods if (e - s).total_seconds() >= 2700]
+                
+                if valid_periods:
+                    found_any = True
+                    st.write(f"**{tage[day]}, {current_day.strftime('%d.%m.')}**")
+                    for start, end in valid_periods:
+                        st.success(f"✅ {start.strftime('%H:%M')} bis {end.strftime('%H:%M')} Uhr")
+                        
+            if not found_any:
+                st.warning("In dieser Woche habt ihr in der gewählten Konstellation leider keine gemeinsamen Freistunden.")
