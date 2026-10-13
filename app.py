@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import re
+import urllib.parse  # NEU HINZUGEFÜGT
 from datetime import datetime, timedelta
 
 def get_ical_events(url, exclude_keywords):
@@ -12,8 +13,9 @@ def get_ical_events(url, exclude_keywords):
         st.error("Ungültige Rapla-URL")
         return []
         
-    user = user_match.group(1)
-    file = file_match.group(1)
+    # NEU: Das %40 wieder in ein echtes @ umwandeln
+    user = urllib.parse.unquote(user_match.group(1))
+    file = urllib.parse.unquote(file_match.group(1))
     
     ical_url = f"https://rapla.dhbw.de/rapla?page=ical&user={user}&file={file}"
     
@@ -70,7 +72,8 @@ all_calendars = {
         "exclude": ["künstliche Intelligenz", "STA Mercedes", "Quantentechnologie"]
     },
     "André": {
-        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24",
+        # Hab hier zur Sicherheit auch den Link exakt so übernommen, wie du ihn geschickt hast
+        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24&day=25&month=10&year=2026&next=%3E%3E&pages=1",
         "exclude": ["Kraftfahrzeuge", "Qualitätsmanagement", "Studienarbeit"]
     },
     "Ruben": {
