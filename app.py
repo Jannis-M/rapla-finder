@@ -1,65 +1,98 @@
 import streamlit as st
 import requests
 import re
-import urllib.parse  # NEU HINZUGEFÜGT
+import urllib.parse
 from datetime import datetime, timedelta
 
-def get_ical_events(url, exclude_keywords):
-    """Wandelt die Rapla-HTML-URL in eine iCal-URL um und liest die Termine aus."""
+def fetch_ical_text(url):
+    """Versucht über verschiedene URLs und Endpoints, die iCal-Daten zuverlässig abzurufen."""
+    urls_to_try = []
+    
+    # 1. Satoqz iCal Proxy (wandelt Rapla-HTML zuverlässig in .ics um)
+    urls_to_try.append(url.replace("rapla.dhbw.de", "rapla.satoqz.net"))
+    
+    # 2. Bereinigte Original-URL mit page=iCal (entfernt feste Datumsfilter)
+    clean_url = re.sub(r'&(day|month|year|next|pages)=[^&]*', '', url)
+    if "page=" not in clean_url:
+        delim = "&" if "?" in clean_url else "?"
+        urls_to_try.append(f"{clean_url}{delim}page=iCal")
+        urls_to_try.append(f"{clean_url}{delim}page=ical")
+        
+    # 3. Standard Rapla iCal-Endpoint
     user_match = re.search(r'user=([^&]+)', url)
     file_match = re.search(r'file=([^&]+)', url)
+    if user_match and file_match:
+        u_raw = user_match.group(1)
+        f_raw = file_match.group(1)
+        u_unquote = urllib.parse.unquote(u_raw)
+        f_unquote = urllib.parse.unquote(f_raw)
+        urls_to_try.append(f"https://rapla.dhbw.de/rapla?page=iCal&user={u_raw}&file={f_raw}")
+        urls_to_try.append(f"https://rapla.dhbw.de/rapla?page=iCal&user={u_unquote}&file={f_unquote}")
+
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
-    if not user_match or not file_match:
-        st.error("Ungültige Rapla-URL")
+    for u in urls_to_try:
+        try:
+            response = requests.get(u, headers=headers, timeout=10)
+            if response.status_code == 200 and "BEGIN:VCALENDAR" in response.text:
+                return response.text
+        except Exception:
+            continue
+            
+    return ""
+
+def get_ical_events(url, exclude_keywords):
+    """Liest die Termine aus dem iCal-Format aus und filtert ausgeschlossene Fächer."""
+    ical_text = fetch_ical_text(url)
+    if not ical_text:
         return []
         
-    # NEU: Das %40 wieder in ein echtes @ umwandeln
-    user = urllib.parse.unquote(user_match.group(1))
-    file = urllib.parse.unquote(file_match.group(1))
+    # Zeilenumbrüche (iCal Line Folding) auflösen
+    unfolded_text = re.sub(r'\r?\n[ \t]', '', ical_text)
+    lines = unfolded_text.splitlines()
     
-    ical_url = f"https://rapla.dhbw.de/rapla?page=ical&user={user}&file={file}"
+    events = []
+    in_event = False
+    current_event = {}
     
-    try:
-        response = requests.get(ical_url)
-        response.raise_for_status()
-        lines = response.text.splitlines()
-        
-        events = []
-        in_event = False
-        current_event = {}
-        
-        for line in lines:
-            if line.startswith("BEGIN:VEVENT"):
-                in_event = True
-                current_event = {}
-            elif line.startswith("END:VEVENT"):
-                in_event = False
-                summary = current_event.get("SUMMARY", "")
-                skip = False
-                for keyword in exclude_keywords:
-                    if keyword.lower() in summary.lower():
-                        skip = True
-                        break
-                        
-                if not skip and "DTSTART" in current_event and "DTEND" in current_event:
-                    events.append(current_event)
-            elif in_event:
-                if line.startswith("SUMMARY:"):
-                    current_event["SUMMARY"] = line[8:]
-                elif line.startswith("DTSTART"):
-                    match = re.search(r':(\d{8}T\d{6})', line)
-                    if match:
+    for line in lines:
+        line = line.strip()
+        if line.startswith("BEGIN:VEVENT"):
+            in_event = True
+            current_event = {}
+        elif line.startswith("END:VEVENT"):
+            in_event = False
+            summary = current_event.get("SUMMARY", "")
+            skip = False
+            for keyword in exclude_keywords:
+                if keyword and keyword.lower() in summary.lower():
+                    skip = True
+                    break
+                    
+            if not skip and "DTSTART" in current_event and "DTEND" in current_event:
+                events.append(current_event)
+        elif in_event:
+            # SUMMARY flexibel parsen (z.B. SUMMARY: oder SUMMARY;LANGUAGE=de:)
+            if line.startswith("SUMMARY"):
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    current_event["SUMMARY"] = parts[1]
+            elif line.startswith("DTSTART"):
+                match = re.search(r':(\d{8}T\d{6})', line)
+                if match:
+                    try:
                         current_event["DTSTART"] = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
-                elif line.startswith("DTEND"):
-                    match = re.search(r':(\d{8}T\d{6})', line)
-                    if match:
+                    except Exception:
+                        pass
+            elif line.startswith("DTEND"):
+                match = re.search(r':(\d{8}T\d{6})', line)
+                if match:
+                    try:
                         current_event["DTEND"] = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S")
+                    except Exception:
+                        pass
                         
-        return events
-        
-    except Exception as e:
-        st.error(f"Fehler beim Laden von {user}: {e}")
-        return []
+    return events
 
 st.set_page_config(page_title="DHBW Termin-Finder", page_icon="📅")
 st.title("DHBW Termin-Finder 📅")
@@ -72,8 +105,7 @@ all_calendars = {
         "exclude": ["künstliche Intelligenz", "STA Mercedes", "Quantentechnologie"]
     },
     "André": {
-        # Hab hier zur Sicherheit auch den Link exakt so übernommen, wie du ihn geschickt hast
-        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24&day=25&month=10&year=2026&next=%3E%3E&pages=1",
+        "url": "https://rapla.dhbw.de/rapla/calendar?user=schraff.k%40vw.ba.ba-ravensburg.de&file=TFS24",
         "exclude": ["Kraftfahrzeuge", "Qualitätsmanagement", "Studienarbeit"]
     },
     "Ruben": {
@@ -165,7 +197,7 @@ if st.button("Zeiten berechnen", type="primary"):
             if show_individual_plans:
                 st.subheader("Stundenpläne (Ausgewählte Woche):")
                 
-                # Wir machen Tabs für jede ausgewählte Person
+                # Tabs für jede ausgewählte Person
                 tabs = st.tabs(selected_names)
                 
                 for i, name in enumerate(selected_names):
@@ -174,7 +206,6 @@ if st.button("Zeiten berechnen", type="primary"):
                         if not person_events:
                             st.write("Keine Vorlesungen in dieser Woche!")
                         else:
-                            # Nach Datum sortieren
                             person_events.sort(key=lambda x: x["start"])
                             
                             current_print_day = None
@@ -185,7 +216,7 @@ if st.button("Zeiten berechnen", type="primary"):
                                     current_print_day = ev_day
                                 st.write(f"- {ev['start'].strftime('%H:%M')} bis {ev['end'].strftime('%H:%M')}: {ev['title']}")
                 
-                st.divider() # Trennlinie
+                st.divider()
 
             # --- TEIL 2: Gemeinsame Freistunden berechnen ---
             st.subheader(f"Eure gemeinsamen Freistunden ({', '.join(selected_names)}):")
